@@ -1,0 +1,65 @@
+name: Publish validated DCGM incident correction
+on:
+  push:
+    branches: [work/publish-dcgm-1795]
+    paths: [.github/workflows/publish-dcgm-1795.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8f37daca53e38f6b89a6b236781f67f13837f71e
+          path: NVSentinel
+      - name: Reconstruct the validated source change
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/sylvesterkaczmarek/nccl-tests/fa3f8dc8f524f91e3d0114d6a4e5eef6f089e7b7/validation/fix_dcgm.py -o fix.py
+          curl -fsSL https://raw.githubusercontent.com/sylvesterkaczmarek/nccl-tests/fa3f8dc8f524f91e3d0114d6a4e5eef6f089e7b7/validation/test_multiple_incident_codes.py -o NVSentinel/health-monitors/gpu-health-monitor/gpu_health_monitor/tests/test_multiple_incident_codes.py
+          python3 fix.py
+          python3 -m pip install --quiet black
+          cd NVSentinel
+          git add -N health-monitors/gpu-health-monitor/gpu_health_monitor/tests/test_multiple_incident_codes.py
+          git diff --name-only -z -- '*.py' | xargs -0 python3 -m black --line-length 120
+      - name: Verify byte identity with the tested source
+        run: |
+          cd NVSentinel
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, subprocess
+          prefix = 'health-monitors/gpu-health-monitor/'
+          expected = {
+            'README.md': '7bfb58fd44ba9a3a56f76574284c7570626ce0ca299c4c847a4bc33ac49fc258',
+            'gpu_health_monitor/dcgm_watcher/dcgm.py': '1d9eddefbe6bd0b52d02e3ebd665490556cc6cbc3ce4826cec2be6572b22e09f',
+            'gpu_health_monitor/dcgm_watcher/types.py': '85d9f8cf3f7cdbff7c3e397bfc94a5d0a4a2c03aa3e2de991fd5e24efcce2cb4',
+            'gpu_health_monitor/platform_connector/platform_connector.py': '93462a4fc870466872dd153e5a2c1d74c7bf237dfa83705e30ff6dc35c7ea4df',
+            'gpu_health_monitor/tests/test_dcgm_watcher/test_dcgm.py': 'f177258cd415912e16e47cba078b7d7d41c31507603e7d95446023dc3712e0e3',
+            'gpu_health_monitor/tests/test_multiple_incident_codes.py': 'e3407b58522a1a70368cdef3d29fd1f2b3a23bc486e2b545e3ed497321735fa9',
+            'gpu_health_monitor/tests/test_platform_connector/test_platform_connector.py': 'fb92a084150811f9b5d499e1402f8ee1239bd439dbd142cf5a80d56399c0427a',
+          }
+          assert set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()) == {prefix + p for p in expected}
+          for p, sha in expected.items():
+              assert hashlib.sha256(Path(prefix + p).read_bytes()).hexdigest() == sha, p
+          print('All seven published files match the source that passed 202 tests.')
+          PY
+          git diff --check
+      - name: Publish a single signed-off commit to the new feature branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd NVSentinel
+          test "$(gh api repos/sylvesterkaczmarek/NVSentinel --jq '.parent.full_name')" = NVIDIA/NVSentinel
+          test "$(gh api repos/NVIDIA/NVSentinel/git/ref/heads/main --jq '.object.sha')" = 8f37daca53e38f6b89a6b236781f67f13837f71e
+          git remote -v
+          git switch -c fix-dcgm-multiple-error-codes-1795
+          git config user.name 'Sylvester Kaczmarek'
+          git config user.email '16242628+sylvesterkaczmarek@users.noreply.github.com'
+          git add health-monitors/gpu-health-monitor
+          git commit -s -m 'fix(gpu-health-monitor): preserve distinct incident error codes'
+          git push --force-with-lease=refs/heads/fix-dcgm-multiple-error-codes-1795: origin HEAD:refs/heads/fix-dcgm-multiple-error-codes-1795
+          git rev-parse HEAD
+          test -z "$(git status --porcelain)"
